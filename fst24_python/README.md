@@ -1,106 +1,95 @@
-# FST24 Python Interface
+# FST24 Python Interface Proposal
 
-A modern Python interface for the FST24 file format, providing efficient access to meteorological data with support for both XDF and RSF backends.
+A modern Python interface for FST24 files, focusing on performance and ease of use. This proposal outlines a new approach to handling FST data with improved performance and memory efficiency.
 
-## Features
+## Key Features
 
-- Fast metadata extraction and data access
-- Support for both XDF and RSF backends
-- Memory-efficient operations with memory mapping
-- Thread-safe file operations
-- Polars and xarray integration
-- Batch processing capabilities
-- Performance optimized for large files
+- **Performance First**
+  - Faster than fstpy for metadata operations (target: 2-3x speedup)
+  - Matches fstd2nc's xarray conversion speed
+  - Memory-efficient with support for large files
 
-## Installation
+- **Modern Interface**
+  - Native Polars DataFrame support
+  - xarray integration with CF conventions
+  - Thread-safe operations
+  - Context manager support
 
-```bash
-pip install fst24-python
-```
+- **Backend Support**
+  - XDF and RSF formats via FST_OPTIONS
+  - Memory mapping for large files (>1GB)
+  - Parallel write support for RSF
 
-## Quick Start
+## Usage Examples
 
 ```python
 import fst24
 
-# Read metadata as Polars DataFrame
-with fst24.open("path/to/file.fst") as f:
-    df = f.to_polars()
+# Fast metadata access (target: <0.05s)
+with fst24.open("file.fst") as f:
+    df = f.to_polars()  # Returns Polars DataFrame
 
-# Read data as xarray Dataset
-with fst24.open("path/to/file.fst") as f:
-    ds = f.to_xarray(forecast_axis=True)
+# Efficient xarray conversion (target: <3.5s)
+with fst24.open("file.fst") as f:
+    ds = f.to_xarray(forecast_axis=True)  # Returns xarray Dataset
 
-# Memory-efficient batch processing
-with fst24.open("path/to/file.fst") as f:
+# Memory-efficient iteration
+with fst24.open("file.fst") as f:
     for record in f.iter_records():
-        data = record.data  # Lazy loading
+        # Lazy loading - data only read when accessed
+        data = record.data  
 ```
 
-## Performance
+## Performance Targets
 
-Benchmarks against baseline implementations:
-
-1. **Metadata Reading**
+1. **Metadata Operations**
    ```python
-   # FST24 (0.03s)
+   # FST24 (target: 0.03s)
    df = fst24.read_metadata("file.fst")
    
-   # FSTPY (0.10s)
+   # Current fstpy (0.10s)
    df = fstpy.StandardFileReader("file.fst").to_pandas()
    ```
 
 2. **XArray Conversion**
    ```python
-   # FST24 (3.5s)
+   # FST24 (target: 3.5s)
    ds = fst24.to_xarray("file.fst", forecast_axis=True)
    
-   # FSTD2NC (3.5s)
+   # Current fstd2nc (3.5s)
    ds = fstd2nc.Buffer("file.fst", forecast_axis=True).to_xarray()
    ```
 
-## Project Structure
+## Design Decisions
 
-```
-fst24_python/
-├── context/                 # Context and design documents
-│   ├── design_decisions.md
-│   ├── dependencies.md
-│   ├── librmn_api.md
-│   └── metadata_handling.md
-├── prompts/                 # Implementation prompts
-│   ├── 00_implementation_order.md
-│   ├── 01_core.md
-│   ├── 02_metadata.md
-│   ├── 03_data_access.md
-│   ├── 04_integration.md
-│   └── 05_polars.md
-├── src/                     # Source code
-│   └── fst24/
-│       ├── __init__.py
-│       ├── core.py
-│       ├── metadata.py
-│       ├── data.py
-│       ├── polars.py
-│       └── xarray.py
-├── tests/                   # Test suite
-│   ├── test_core.py
-│   ├── test_metadata.py
-│   ├── test_data.py
-│   ├── test_polars.py
-│   └── test_xarray.py
-├── README.md
-├── pyproject.toml
-└── setup.py
-```
+1. **Memory Management**
+   - Memory mapping for files >1GB
+   - Zero-copy views when possible
+   - Proper cleanup in destructors
+   - Global memory limit configuration
+
+2. **Thread Safety**
+   - File-level locking for RSF backend
+   - Thread-local storage for handles
+   - Atomic write operations
+
+3. **Data Organization**
+   - Run-level metadata caching
+   - Batch record processing
+   - Lazy data loading
+
+4. **Error Handling**
+   - Clear error messages
+   - Proper resource cleanup
+   - Safe fallbacks for memory issues
 
 ## Implementation Plan
 
-### Phase 1: Core Interface (1-2 days)
+### Phase 1: Core (1-2 days)
 - Basic file operations
-- Record reading and writing
-- Metadata handling
+- Record handling
 - Thread safety
+- Memory management
 
 ### Phase 2: Data Access (2-3 days)
 - Memory mapping
@@ -120,29 +109,16 @@ fst24_python/
 - Benchmarks
 - Documentation
 
-## Development Setup
+## Dependencies
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/your-org/fst24-python.git
-   cd fst24-python
-   ```
+### Core
+- numpy>=1.24.0
+- polars>=0.20.0
+- xarray>=2023.12.0
+- typing_extensions>=4.8.0
 
-2. **Create virtual environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # or venv\Scripts\activate on Windows
-   ```
-
-3. **Install dependencies**
-   ```bash
-   pip install -e ".[dev]"
-   ```
-
-4. **Run tests**
-   ```bash
-   pytest tests/
-   ```
+### System
+- librmn>=20.0.0 (with FST24/RSF support)
 
 ## Configuration
 
@@ -157,20 +133,17 @@ import fst24
 fst24.set_memory_limit(16 * 1024**3)  # 16GB limit
 ```
 
-### Thread Safety
-```python
-import fst24
-fst24.enable_thread_safety()
-```
+## Questions for Review
 
-## Contributing
+1. Are the performance targets sufficient for your use cases?
+2. Do you need any additional metadata fields beyond the core set?
+3. Are there specific grid types or operations that need optimization?
+4. Would you prefer different default behaviors for memory management?
+5. Are there additional integration points needed beyond Polars and xarray?
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests
-5. Submit a pull request
+## Next Steps
 
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+1. Review and feedback on the proposed design
+2. Prioritization of features and performance targets
+3. Discussion of specific use cases and requirements
+4. Agreement on implementation timeline
