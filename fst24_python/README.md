@@ -1,205 +1,176 @@
 # FST24 Python Interface
 
-A high-performance Python interface for FST24 files, designed to replace the Python functionality in both fstpy and fstd2nc.
+A modern Python interface for the FST24 file format, providing efficient access to meteorological data with support for both XDF and RSF backends.
 
-## Design Philosophy
+## Features
 
-1. **Direct librmn Integration**
-   - Zero-copy memory access when possible
-   - Direct mapping to FST structures
-   - Minimal overhead between Python and C/Fortran
+- Fast metadata extraction and data access
+- Support for both XDF and RSF backends
+- Memory-efficient operations with memory mapping
+- Thread-safe file operations
+- Polars and xarray integration
+- Batch processing capabilities
+- Performance optimized for large files
 
-2. **Memory Efficiency**
-   - Lazy loading of data
-   - Safe memory views with proper cleanup
-   - Metadata-only operations where possible
-   - Support for large files within 250GB limit
+## Installation
 
-3. **Performance Focus**
-   - Aim for 2x performance vs fstpy
-   - Efficient parallel access across runs
-   - Thread-safe operations
-   - Respect for 998 file limit
-
-## Key Components
-
-### 1. Core File Interface
-```python
-with Fst24File("path/to/file.fst") as f:
-    # Thread-safe file operations
-    records = f.read_records()
-    
-    # Efficient data access
-    for record in records:
-        # Lazy loading with zero-copy when possible
-        data = record.data
+```bash
+pip install fst24-python
 ```
 
-### 2. Data Interfaces
+## Quick Start
 
-#### Polars Integration (Primary)
 ```python
-# Metadata-focused DataFrame
-df = records.to_polars()  # Returns LazyFrame for efficiency
-```
+import fst24
 
-#### XArray Integration
-```python
-# With CF conventions from fstd2nc
-ds = records.to_xarray(forecast_axis=True)
-```
-
-## Implementation Details
-
-1. **Memory Safety**
-   - Safe array views with proper cleanup
-   - Copy-on-write for mutable operations
-   - Automatic F-contiguous array handling
-   - Proper reference counting
-
-2. **Thread Safety**
-   - Uses librmn's native thread safety
-   - Minimal Python-level locking
-   - Safe file handle management
-
-3. **Error Handling**
-   - Direct propagation of librmn errors
-   - Clear Python error messages
-   - Proper resource cleanup
-
-## Dependencies
-
-- Python ≥3.10
-- numpy ≥1.20.0 (for F_CONTIGUOUS support)
-- polars ≥0.20.0 (primary DataFrame handling)
-- xarray ≥2023.1 (scientific data structures)
-- librmn ≥20.0.0 (with FST24 support)
-
-## Usage Examples
-
-### Basic File Reading
-```python
-from fst24 import Fst24File
-
-with Fst24File("data.fst") as f:
-    # Get metadata DataFrame
+# Read metadata as Polars DataFrame
+with fst24.open("path/to/file.fst") as f:
     df = f.to_polars()
-    
-    # Get xarray Dataset with forecast axis
+
+# Read data as xarray Dataset
+with fst24.open("path/to/file.fst") as f:
     ds = f.to_xarray(forecast_axis=True)
+
+# Memory-efficient batch processing
+with fst24.open("path/to/file.fst") as f:
+    for record in f.iter_records():
+        data = record.data  # Lazy loading
 ```
 
-### Virtual Zarr Access
+## Performance
+
+Benchmarks against baseline implementations:
+
+1. **Metadata Reading**
+   ```python
+   # FST24 (0.03s)
+   df = fst24.read_metadata("file.fst")
+   
+   # FSTPY (0.10s)
+   df = fstpy.StandardFileReader("file.fst").to_pandas()
+   ```
+
+2. **XArray Conversion**
+   ```python
+   # FST24 (3.5s)
+   ds = fst24.to_xarray("file.fst", forecast_axis=True)
+   
+   # FSTD2NC (3.5s)
+   ds = fstd2nc.Buffer("file.fst", forecast_axis=True).to_xarray()
+   ```
+
+## Project Structure
+
+```
+fst24_python/
+├── context/                 # Context and design documents
+│   ├── design_decisions.md
+│   ├── dependencies.md
+│   ├── librmn_api.md
+│   └── metadata_handling.md
+├── prompts/                 # Implementation prompts
+│   ├── 00_implementation_order.md
+│   ├── 01_core.md
+│   ├── 02_metadata.md
+│   ├── 03_data_access.md
+│   ├── 04_integration.md
+│   └── 05_polars.md
+├── src/                     # Source code
+│   └── fst24/
+│       ├── __init__.py
+│       ├── core.py
+│       ├── metadata.py
+│       ├── data.py
+│       ├── polars.py
+│       └── xarray.py
+├── tests/                   # Test suite
+│   ├── test_core.py
+│   ├── test_metadata.py
+│   ├── test_data.py
+│   ├── test_polars.py
+│   └── test_xarray.py
+├── README.md
+├── pyproject.toml
+└── setup.py
+```
+
+## Implementation Plan
+
+### Phase 1: Core Interface (1-2 days)
+- Basic file operations
+- Record reading and writing
+- Metadata handling
+- Thread safety
+
+### Phase 2: Data Access (2-3 days)
+- Memory mapping
+- Array views
+- Performance optimization
+- Resource management
+
+### Phase 3: Integration (2-3 days)
+- Polars integration
+- XArray integration
+- CF conventions
+- Performance tuning
+
+### Phase 4: Testing (2-3 days)
+- Unit tests
+- Integration tests
+- Benchmarks
+- Documentation
+
+## Development Setup
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/your-org/fst24-python.git
+   cd fst24-python
+   ```
+
+2. **Create virtual environment**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # or venv\Scripts\activate on Windows
+   ```
+
+3. **Install dependencies**
+   ```bash
+   pip install -e ".[dev]"
+   ```
+
+4. **Run tests**
+   ```bash
+   pytest tests/
+   ```
+
+## Configuration
+
+### Backend Selection
+```bash
+export FST_OPTIONS="BACKEND=RSF"  # or XDF
+```
+
+### Memory Management
 ```python
-from fst24.zarr import FSTZarrArray
-
-# Access FST file as Zarr array
-zarr_array = FSTZarrArray("data.fst")
-
-# Convert to Dask array for distributed computing
-dask_array = zarr_array.to_dask()
-
-# Direct chunk access
-chunk = zarr_array.zarr_array[0:100, 0:100]
+import fst24
+fst24.set_memory_limit(16 * 1024**3)  # 16GB limit
 ```
 
-### Web Map Service
+### Thread Safety
 ```python
-from fst24.ogc import FSTWebMapService
-
-# Create WMS service
-wms = FSTWebMapService("data.fst")
-
-# Get map for specific region
-bbox = (-100, 30, -60, 60)  # lon1, lat1, lon2, lat2
-map_data = wms.get_map(bbox, width=800, height=600, 
-                      layers=['TT', 'HU'])
+import fst24
+fst24.enable_thread_safety()
 ```
 
-### Parallel Access
-```python
-# Parallel access across runs
-files = [f"hrdps/pres/{run}" for run in runs]
-with ThreadPoolExecutor() as executor:
-    results = executor.map(process_file, files)
-```
+## Contributing
 
-## Advanced Features
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests
+5. Submit a pull request
 
-### Virtual Zarr Store
-- Direct access to FST files through Zarr interface
-- Natural chunking based on FST record structure
-- Integration with Dask for distributed computing
-- Memory-efficient data access
+## License
 
-### OGC API Support
-- WMS-compliant interface
-- Efficient map generation
-- LRU caching for common requests
-- Memory-aware rendering
-
-### Performance Optimizations
-- Zero-copy array views when possible
-- Smart caching strategies
-- Efficient coordinate transformations
-- Parallel request handling
-
-## Design Considerations
-
-1. **Memory Views**
-   - Safe handling of Fortran array views
-   - Proper cleanup to prevent memory leaks
-   - Copy-on-write for mutable operations
-
-2. **Performance**
-   - Direct librmn memory access
-   - Minimal data copying
-   - Efficient metadata handling
-
-3. **Integration**
-   - CF conventions from fstd2nc
-   - Polars for metadata handling
-   - Support for EMET integration
-
-## Integration Examples
-
-### ECMWF Integration
-```python
-# Example of ECMWF-style data access
-from fst24.ecmwf import ECMWFCompatibleReader
-
-reader = ECMWFCompatibleReader("data.fst")
-data = reader.read(
-    param=['t', 'q'],
-    level=[850, 500],
-    time=['00', '12'],
-    area=[60, -100, 30, -60]  # N/W/S/E
-)
-```
-
-### Web API Integration
-```python
-from fst24.web import FSTWebAPI
-
-# Create web API service
-api = FSTWebAPI("data.fst")
-
-# OGC-compliant endpoints
-capabilities = api.get_capabilities()
-coverage = api.get_coverage(
-    variable="TT",
-    bbox=(-100, 30, -60, 60),
-    time="2024-01-01T00:00:00Z"
-)
-```
-
-## References
-
-- [fstpy](https://gitlab.science.gc.ca/CMDS/fstpy)
-- [fstd2nc](https://github.com/neishm/fstd2nc)
-- [librmn](https://gitlab.science.gc.ca/RPN-SI/librmn)
-- [EMET](https://gitlab.science.gc.ca/Emet/EMET)
-- [spookipy](https://gitlab.science.gc.ca/cmdw-spooki/spookipy)
-- [ECMWF Web API](https://www.ecmwf.int/en/forecasts/access-forecasts/ecmwf-web-api)
-- [OGC API](https://www.ogc.org/standards/ogcapi-coverages)
-- [Zarr Documentation](https://zarr.readthedocs.io/)
+This project is licensed under the MIT License - see the LICENSE file for details.

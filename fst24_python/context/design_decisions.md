@@ -1,6 +1,64 @@
 # Design Decisions
 
-## 1. Core API Structure
+## 1. Implementation Order
+
+1. Core File Interface
+   - Direct librmn bindings using ctypes
+   - Backend selection (RSF/XDF) via environment variables
+   - Thread safety per backend
+   - Error propagation and cleanup
+
+2. Metadata Handling
+   - Core Metadata (Fast Path):
+     ```python
+     @dataclass
+     class CoreMetadata:
+         """Fast-path metadata extraction"""
+         nomvar: str
+         typvar: str
+         etiket: str
+         datev: int
+         ip1: int
+         ip2: int
+         ip3: int
+         ni: int
+         nj: int
+         nk: int
+         grtyp: str
+         ig1: int
+         ig2: int
+         ig3: int
+         ig4: int
+     ```
+   - Extended Metadata (Optional):
+     ```python
+     class MetadataDecoder:
+         """Optional metadata decoding"""
+         def decode_metadata(self, core: CoreMetadata) -> Dict[str, Any]:
+             """Decode additional metadata fields"""
+             return {
+                 'bounded': self._check_bounded(core),
+                 'missing_data': self._check_missing(core),
+                 # ... other decoded fields
+             }
+     ```
+   - Performance Focus:
+     - Zero-copy core metadata
+     - Lazy evaluation for extended fields
+     - Batch processing optimization
+
+3. Data Access Layer
+   - Memory mapping for large files
+   - F-contiguous array handling
+   - Safe memory views
+   - Lazy loading
+
+4. Integration Layer
+   - xarray with CF conventions (match fstd2nc speed)
+   - Grid operations placeholder
+   - Performance benchmarking
+
+## 2. Core API Structure
 
 ### Direct librmn Integration
 ```python
@@ -124,12 +182,17 @@ class Fst24Record:
 
 class Fst24DataInterface:
     """Optimized data interface with minimal copying"""
-    def __init__(self, records: List[Fst24Record]):
+    def __init__(self, records: List[Fst24Record], 
+                 decode_metadata: bool = False,
+                 decoder: Optional[MetadataDecoder] = None):
         self._records = records
+        self._decode_metadata = decode_metadata
+        self._decoder = decoder or DefaultMetadataDecoder()
         
     def to_polars(self) -> pl.LazyFrame:
         """Metadata-only Polars conversion"""
-        return pl.LazyFrame({
+        # Fast path for core metadata
+        df = pl.LazyFrame({
             'nomvar': [bytes(r._record.nomvar).strip() for r in self._records],
             'typvar': [bytes(r._record.typvar).strip() for r in self._records],
             'etiket': [bytes(r._record.etiket).strip() for r in self._records],
@@ -140,21 +203,28 @@ class Fst24DataInterface:
             'grid_info': [self._grid_info(r._record) for r in self._records]
         })
         
+        # Optional extended metadata
+        if self._decode_metadata:
+            extended = [self._decoder.decode_metadata(r) for r in self._records]
+            df = df.with_columns([
+                pl.col(k).alias(k) for k in extended[0].keys()
+            ])
+            
+        return df
+        
     def to_xarray(self, forecast_axis: bool = False) -> xr.Dataset:
         """Efficient xarray conversion with CF conventions from fstd2nc"""
         ds = xr.Dataset()
         
         for record in self._records:
             var_name = bytes(record._record.nomvar).strip().decode('utf-8')
-            # Use fstd2nc's CF convention mapping
             coords = self._get_fstd2nc_coordinates(record)
             
             if forecast_axis:
                 coords['forecast'] = self._get_forecast_coord(record)
                 
-            # Create view of data when possible
             ds[var_name] = xr.DataArray(
-                data=record.data,  # Uses lazy loading with potential zero-copy
+                data=record.data,
                 dims=list(coords.keys()),
                 coords=coords,
                 attrs=self._get_fstd2nc_attributes(record)
@@ -163,164 +233,94 @@ class Fst24DataInterface:
         return ds
 ```
 
-## 2. Memory Management
+## 3. Memory Management
 
-### Zero-Copy Strategy
-```python
-def get_array_view(ptr: int, shape: Tuple[int, ...], dtype: np.dtype) -> np.ndarray:
-    """Create numpy view of C/Fortran memory"""
-    try:
-        # Attempt zero-copy view
-        return np.ctypeslib.as_array(
-            (dtype._type_ * np.prod(shape)).from_address(ptr),
-            shape=shape
-        )
-    except:
-        # Fallback to copy if needed
-        return np.array(ptr, dtype=dtype, copy=True, order='F')
-```
+### Thread Safety Requirements
+- RSF Backend:
+  - All operations are thread-safe
+  - Parallel write support
+  - No explicit locking needed
+- XDF Backend:
+  - Limited thread safety
+  - File-level locking required
+  - No parallel write support
 
-## 3. Performance Considerations
-
-### Memory Efficiency
-- Use direct librmn memory access when possible
-- Minimize data copying between Python and C/Fortran
-- Lazy loading of record data
-- Metadata-only operations where possible
-
-### Thread Safety
-- Use native librmn thread safety mechanisms
-- Minimal Python-level locking
-- Respect 998 file limit
+### Memory Mapping Strategy
+- Files > 1GB: Automatic memory mapping
+- Files ≤ 1GB: Direct memory access
+- Cleanup on context exit
 
 ### Error Handling
-- Propagate librmn errors directly
-- Clean error messages for Python users
-- Proper resource cleanup
+- Direct error code propagation
+- Resource cleanup in __exit__
+- Clear Python exceptions
 
-## 4. Virtual Zarr Integration
+## 4. Performance Targets
 
-### FST Virtual Store
+### Metadata Operations
+- Core metadata (no decode): Sub-0.03s for typical files (179 records)
+- Extended metadata (with decode): Sub-0.12s
+- Batch processing: Scale linearly with record count
+- Metadata decoding should be strictly opt-in
+
+### Data Access
+- Zero-copy when possible
+- F-contiguous array handling
+- Memory mapping for files > 1GB
+
+### xarray Integration
+- Target conversion time: Sub-3.5s for typical files
+- Efficient forecast axis support
+- Preserve CF conventions
+- Handle IP3 values gracefully
+
+### Parallel Operations
+- Thread-safe file handles
+- Respect 998 file limit
+- Efficient run-level caching
+
+### Benchmark Files
 ```python
-class FSTZarrStore(MutableMapping):
-    """Virtual Zarr store backed by FST files"""
-    def __init__(self, fst_path: str, chunk_shape: Optional[Tuple[int, ...]] = None):
-        self._fst_file = Fst24File(fst_path)
-        self._chunk_shape = chunk_shape
-        self._metadata = None
-        
-    def _init_metadata(self):
-        """Initialize Zarr metadata from FST structure"""
-        if self._metadata is None:
-            with self._fst_file as f:
-                records = f.read_records()
-                self._metadata = self._create_zarr_metadata(records)
-                
-    def _create_zarr_metadata(self, records: List[Fst24Record]) -> Dict:
-        """Create Zarr metadata from FST records"""
-        # Map FST structure to Zarr chunks
-        # Use natural FST record boundaries where possible
-        return {
-            'zarr_version': 2,
-            'shape': self._compute_shape(records),
-            'chunks': self._chunk_shape or self._compute_optimal_chunks(records),
-            'dtype': self._get_dtype(records),
-            'compressor': None,  # Direct access to FST compression
-            'fill_value': None,
-            'order': 'F'  # Match FST's Fortran order
-        }
-        
-    def __getitem__(self, key: str) -> bytes:
-        """Map Zarr chunk requests to FST records"""
-        if key == '.zarray':
-            self._init_metadata()
-            return json.dumps(self._metadata).encode()
-            
-        # Parse chunk coordinates from key
-        chunk_coords = self._parse_chunk_key(key)
-        return self._read_chunk(chunk_coords)
-        
-    def _read_chunk(self, coords: Tuple[int, ...]) -> bytes:
-        """Read chunk data directly from FST records"""
-        with self._fst_file as f:
-            # Map chunk coordinates to FST records
-            records = self._find_records_for_chunk(coords)
-            # Efficient assembly of chunk data
-            return self._assemble_chunk(records, coords)
+# Test file paths for consistent benchmarking
+BENCHMARK_FILES = [
+    '/space/hall5/sitestore/eccc/prod/hubs/gridpt/dbase/prog/glbdiag.usr/2024122200_000',  # Core metadata
+    '/space/hall5/sitestore/eccc/prod/hubs/gridpt/dbase/prog/glbdiag.usr/2024122200_001',  # Extended metadata
+    '/space/hall5/sitestore/eccc/prod/hubs/gridpt/dbase/prog/glbdiag.usr/2024122200_002'   # xarray conversion
+]
 
-class FSTZarrArray:
-    """High-level interface for FST files as Zarr arrays"""
-    def __init__(self, fst_path: str):
-        self._store = FSTZarrStore(fst_path)
-        self._zarr_array = zarr.Array(self._store)
-        
-    @property
-    def zarr_array(self) -> zarr.Array:
-        """Access as standard Zarr array"""
-        return self._zarr_array
-        
-    def to_dask(self) -> da.Array:
-        """Convert to Dask array for distributed computing"""
-        return da.from_zarr(self._store)
+# Metadata performance (target: match or exceed fstpy)
+def benchmark_metadata():
+    """Benchmark metadata extraction speed"""
+    with Fst24File(BENCHMARK_FILES[0]) as f:
+        # Core metadata (target: < 0.03s)
+        t0 = time.time()
+        df = f.to_polars()
+        core_time = time.time() - t0
+
+        # Extended metadata (target: < 0.12s)
+        t0 = time.time()
+        df = f.to_polars(decode_metadata=True)
+        extended_time = time.time() - t0
+
+        return {'core': core_time, 'extended': extended_time}
+
+# xarray performance (target: match fstd2nc)
+def benchmark_xarray():
+    """Benchmark xarray conversion speed"""
+    with Fst24File(BENCHMARK_FILES[2]) as f:
+        t0 = time.time()
+        ds = f.to_xarray(
+            forecast_axis=True,
+            rpnstd_metadata=True
+        )
+        return time.time() - t0  # Target: < 3.5s
 ```
 
-## 5. OGC API Support
+### Environment Setup
+```bash
+# Required for metadata decoding
+export CMCCONST=/home/smco502/datafiles/constants
 
-### Web Map Service Interface
-```python
-class FSTWebMapService:
-    """Base class for OGC-compliant web services"""
-    def __init__(self, fst_path: str):
-        self._fst_file = Fst24File(fst_path)
-        self._cache = LRUCache(maxsize=1000)  # Cache common requests
-        
-    def get_capabilities(self) -> Dict:
-        """Generate WMS capabilities document"""
-        with self._fst_file as f:
-            metadata = f.read_metadata()
-            return self._create_capabilities(metadata)
-            
-    def get_map(self, bbox: Tuple[float, float, float, float],
-                width: int, height: int, layers: List[str]) -> np.ndarray:
-        """Efficient map generation from FST data"""
-        cache_key = self._make_cache_key(bbox, width, height, layers)
-        
-        # Check cache first
-        if cache_key in self._cache:
-            return self._cache[cache_key]
-            
-        # Generate map efficiently
-        with self._fst_file as f:
-            records = f.read_records(variables=layers)
-            map_data = self._generate_map(records, bbox, width, height)
-            self._cache[cache_key] = map_data
-            return map_data
-            
-    def _generate_map(self, records: List[Fst24Record],
-                     bbox: Tuple[float, float, float, float],
-                     width: int, height: int) -> np.ndarray:
-        """Efficient map generation with minimal memory usage"""
-        # Use record metadata to optimize data access
-        required_records = self._find_required_records(records, bbox)
-        
-        # Generate map with minimal memory overhead
-        return self._render_map(required_records, bbox, width, height)
+# Backend selection
+export FST_OPTIONS="BACKEND=RSF"
 ```
-
-## 6. Performance Optimizations
-
-### Zarr Integration
-- Use FST record boundaries for natural chunking
-- Direct access to FST compression
-- Minimal data copying for Zarr views
-
-### Web Service Optimization
-- LRU caching for common requests
-- Efficient coordinate transformations
-- Memory-aware rendering
-- Parallel request handling
-
-### Memory Management
-- Shared memory views where possible
-- Efficient coordinate transformations
-- Smart caching strategies
